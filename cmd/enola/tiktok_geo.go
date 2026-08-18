@@ -181,6 +181,56 @@ func printGeoResult(r *tiktok.GeoResult) {
 		fmt.Println()
 	}
 
+	// ── Posting-Time Timezone Inference ──────────────────────────────────
+	if r.PostingPattern != nil {
+		pp := r.PostingPattern
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Posting-Time Timezone Analysis")
+		fmt.Printf("%s\n", sep)
+		fmt.Printf("  Videos analysed  : %d\n", pp.TotalVideos)
+		fmt.Printf("  Best timezone    : %s  (fit score: %.0f%%)\n", pp.BestOffsetStr, pp.FitScore*100)
+		if len(pp.LikelyCountries) > 0 {
+			fmt.Printf("  Likely countries : %s\n", strings.Join(pp.LikelyCountries, ", "))
+		}
+		fmt.Println()
+
+		// Posting-hour histogram
+		fmt.Println("  UTC posting-hour distribution (→ local hours via best offset):")
+		peakHour := tiktok.PeakUTCHour(pp)
+		for h := 0; h < 24; h++ {
+			cnt := pp.HourHistogram[h]
+			if cnt == 0 {
+				continue
+			}
+			// Convert to local using best offset
+			localH := ((h*2 + pp.BestOffsetHalf) / 2 % 24 + 24) % 24
+			bar := strings.Repeat("█", cnt)
+			peak := ""
+			if h == peakHour {
+				peak = " ← peak"
+			}
+			fmt.Printf("    %02d:00 UTC  (%02d:00 local)  %s (%d)%s\n", h, localH, bar, cnt, peak)
+		}
+
+		// Runner-up timezones
+		if len(pp.CandidateTZs) > 1 {
+			fmt.Println()
+			fmt.Println("  Candidate timezones:")
+			for i, tz := range pp.CandidateTZs {
+				marker := "  "
+				if i == 0 {
+					marker = "→ "
+				}
+				countries := strings.Join(tz.Countries, ", ")
+				if len(countries) > 50 {
+					countries = countries[:47] + "..."
+				}
+				fmt.Printf("  %s%-8s  %s\n", marker, tz.OffsetStr, countries)
+			}
+		}
+		fmt.Println()
+	}
+
 	// ── Video Geolocation (CDN IP + location tags) ────────────────────────
 	if len(r.VideoGeos) > 0 {
 		fmt.Printf("%s\n", sep)
@@ -254,6 +304,36 @@ func printGeoResult(r *tiktok.GeoResult) {
 	} else if len(r.Videos) > 0 {
 		fmt.Printf("  [i] %d videos scanned — no comments by @%s found in top results\n\n",
 			len(r.Videos), r.Username)
+	}
+
+	// ── Cross-Platform Profiles ───────────────────────────────────────────
+	real := 0
+	for _, h := range r.CrossPlatform {
+		if h.Found && h.Platform != "Web search" {
+			real++
+		}
+	}
+	if real > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Cross-Platform Profile Correlation")
+		fmt.Printf("%s\n", sep)
+		for _, h := range r.CrossPlatform {
+			if !h.Found || h.Platform == "Web search" {
+				continue
+			}
+			fmt.Printf("\n  [%s] %s\n", h.Platform, h.URL)
+			if h.Location != "" {
+				fmt.Printf("    Location : %s\n", h.Location)
+			}
+			if h.Bio != "" {
+				bio := h.Bio
+				if len(bio) > 120 {
+					bio = bio[:117] + "..."
+				}
+				fmt.Printf("    Bio      : %s\n", bio)
+			}
+		}
+		fmt.Println()
 	}
 
 	if len(r.CountryScores) == 0 {

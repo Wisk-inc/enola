@@ -1,6 +1,7 @@
 package tiktok
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -169,6 +170,112 @@ func TestISOToCountry(t *testing.T) {
 	}
 	if got := isoToCountry("XX"); got != "" {
 		t.Errorf("expected empty for unknown code, got %q", got)
+	}
+}
+
+// ─── Timezone tests ──────────────────────────────────────────────────────────
+
+func TestAnalyzePostingTimes_Jamaica(t *testing.T) {
+	// Create fake videos posted at 22:00 UTC-5 = 03:00 UTC
+	// i.e. UTC hours 02, 03, 04 — these should fit UTC-5 best
+	// (22:00 local = bedtime fringe, but let's push it into evening at UTC-4)
+	// Use 22:00 local time with UTC-5 → 03:00 UTC
+	baseUTC := int64(1700000000) // some fixed epoch
+	hourUTC := baseUTC - (baseUTC % 86400) // start of that day UTC
+
+	var videos []VideoItem
+	// Post at 23:00 local Jamaica (UTC-5) = 04:00 UTC
+	for i := 0; i < 10; i++ {
+		videos = append(videos, VideoItem{
+			VideoID:    fmt.Sprintf("v%d", i),
+			CreateTime: hourUTC + 4*3600 + int64(i)*86400,
+		})
+	}
+	// Also post at 20:00 local = 01:00 UTC
+	for i := 0; i < 5; i++ {
+		videos = append(videos, VideoItem{
+			VideoID:    fmt.Sprintf("v2%d", i),
+			CreateTime: hourUTC + 1*3600 + int64(i)*86400,
+		})
+	}
+
+	pp := AnalyzePostingTimes(videos)
+	if pp == nil {
+		t.Fatal("expected PostingPattern, got nil")
+	}
+	if pp.TotalVideos != 15 {
+		t.Errorf("expected 15 videos, got %d", pp.TotalVideos)
+	}
+	// Best offset should be UTC-5 (half = -10) or UTC-4 (half = -8)
+	// which maps to Jamaica / Caribbean
+	gotCountries := strings.Join(pp.LikelyCountries, " ")
+	if !strings.Contains(gotCountries, "Jamaica") && !strings.Contains(gotCountries, "United States") {
+		t.Errorf("expected Jamaica or US in likely countries, got: %v", pp.LikelyCountries)
+	}
+}
+
+func TestAnalyzePostingTimes_TooFewVideos(t *testing.T) {
+	videos := []VideoItem{
+		{VideoID: "a", CreateTime: 1700000000},
+		{VideoID: "b", CreateTime: 1700086400},
+	}
+	pp := AnalyzePostingTimes(videos)
+	if pp != nil {
+		t.Error("expected nil for < 3 videos")
+	}
+}
+
+func TestHalfToUTCString(t *testing.T) {
+	cases := map[int]string{
+		-10: "UTC-5",
+		-8:  "UTC-4",
+		0:   "UTC+0",
+		2:   "UTC+1",
+		11:  "UTC+5:30",
+	}
+	for half, want := range cases {
+		got := halfToUTCString(half)
+		if got != want {
+			t.Errorf("halfToUTCString(%d) = %q, want %q", half, got, want)
+		}
+	}
+}
+
+func TestActivityScore(t *testing.T) {
+	// Evening should score highest
+	if activityScore(20) <= activityScore(3) {
+		t.Error("expected evening (20:00) to score higher than dead zone (03:00)")
+	}
+	// Dead zone should be negative
+	if activityScore(4) >= 0 {
+		t.Errorf("expected dead zone (04:00) to be negative, got %.1f", activityScore(4))
+	}
+}
+
+// ─── Cross-platform tests ─────────────────────────────────────────────────────
+
+func TestPlatformDomain(t *testing.T) {
+	cases := map[string]string{
+		"https://www.instagram.com/{}/": "instagram.com",
+		"https://x.com/{}":              "x.com",
+		"https://www.facebook.com/{}":   "facebook.com",
+	}
+	for urlFmt, want := range cases {
+		got := platformDomain(urlFmt)
+		if got != want {
+			t.Errorf("platformDomain(%q) = %q, want %q", urlFmt, got, want)
+		}
+	}
+}
+
+func TestExtractFromPage_LocationMeta(t *testing.T) {
+	html := `<html><head>
+	<meta name="geo.region" content="JM-01" />
+	<meta name="description" content="Kingston reggae artist" />
+	</head><body></body></html>`
+	bio, location, _ := extractFromPage(html, []string{`"description"`, `"location"`})
+	if bio == "" && location == "" {
+		t.Error("expected non-empty bio or location")
 	}
 }
 

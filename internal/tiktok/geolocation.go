@@ -22,18 +22,20 @@ type Signal struct {
 
 // GeoResult is the final output of a full analysis.
 type GeoResult struct {
-	Username      string
-	TikTokURL     string
-	Profile       *TikTokProfile
-	Signals       []Signal
-	CountryScores map[string]float64
-	BestGuess     string
-	Confidence    string // High / Medium / Low
-	Emails        []EmailResult
-	LinkedURLs    []string
-	Videos        []VideoItem
-	VideoGeos     []VideoGeoResult
-	Comments      []CommentItem // comments BY the target user on their own videos
+	Username       string
+	TikTokURL      string
+	Profile        *TikTokProfile
+	Signals        []Signal
+	CountryScores  map[string]float64
+	BestGuess      string
+	Confidence     string // High / Medium / Low
+	Emails         []EmailResult
+	LinkedURLs     []string
+	Videos         []VideoItem
+	VideoGeos      []VideoGeoResult
+	Comments       []CommentItem // comments BY the target user on their own videos
+	PostingPattern *PostingPattern
+	CrossPlatform  []CrossPlatformHit
 }
 
 // EmailResult bundles a discovered email with all findings about it.
@@ -46,10 +48,11 @@ type EmailResult struct {
 
 // GeoLocator orchestrates the full geolocation pipeline.
 type GeoLocator struct {
-	scraper      *Scraper
-	gmailFinder  *GmailFinder
-	apiClient    *APIClient
-	videoAnalyzer *VideoGeoAnalyzer
+	scraper         *Scraper
+	gmailFinder     *GmailFinder
+	apiClient       *APIClient
+	videoAnalyzer   *VideoGeoAnalyzer
+	crossPlatform   *CrossPlatformFinder
 }
 
 // NewGeoLocator returns a GeoLocator with default HTTP settings.
@@ -60,6 +63,7 @@ func NewGeoLocator() *GeoLocator {
 		gmailFinder:   NewGmailFinder(s),
 		apiClient:     NewAPIClient(s),
 		videoAnalyzer: NewVideoGeoAnalyzer(s),
+		crossPlatform: NewCrossPlatformFinder(s),
 	}
 }
 
@@ -161,7 +165,13 @@ func (g *GeoLocator) Analyze(ctx context.Context, input string) (*GeoResult, err
 	// ── Step 5: Video + comment geolocation ────────────────────────────────
 	g.analyzeVideosAndComments(ctx, username, result)
 
-	// ── Step 6: Finalise ────────────────────────────────────────────────────
+	// ── Step 6: Posting-time timezone inference ─────────────────────────────
+	g.analyzePostingTimes(result)
+
+	// ── Step 7: Cross-platform profile correlation ──────────────────────────
+	g.analyzeCrossPlatform(ctx, username, result)
+
+	// ── Step 8: Finalise ────────────────────────────────────────────────────
 	g.finalise(result)
 	return result, nil
 }
@@ -454,6 +464,54 @@ func (g *GeoLocator) finalise(result *GeoResult) {
 		result.Confidence = "Medium"
 	default:
 		result.Confidence = "Low"
+	}
+}
+
+// analyzePostingTimes runs timezone inference on collected video timestamps.
+func (g *GeoLocator) analyzePostingTimes(result *GeoResult) {
+	if len(result.Videos) == 0 {
+		return
+	}
+	pp := AnalyzePostingTimes(result.Videos)
+	if pp == nil {
+		return
+	}
+	result.PostingPattern = pp
+
+	weight := TZWeight(pp)
+	for i, country := range pp.LikelyCountries {
+		// First country in list gets full weight; others get diminishing weight
+		w := weight / float64(i+1)
+		g.addSignal(result, country,
+			fmt.Sprintf("posting-time analysis → best timezone %s (fit=%.0f%%)",
+				pp.BestOffsetStr, pp.FitScore*100),
+			fmt.Sprintf("timezone inference (%d videos)", pp.TotalVideos), w)
+	}
+}
+
+// analyzeCrossPlatform searches other social networks for the same username.
+func (g *GeoLocator) analyzeCrossPlatform(ctx context.Context, username string, result *GeoResult) {
+	hits := g.crossPlatform.Search(ctx, username)
+	result.CrossPlatform = hits
+
+	for _, hit := range hits {
+		text := hit.Bio + " " + hit.Location + " " + hit.RawSnippet
+		if text == "  " {
+			continue
+		}
+		source := fmt.Sprintf("cross-platform: %s (%s)", hit.Platform, hit.URL)
+		// Explicit location field is a very strong signal
+		if hit.Location != "" {
+			g.scoreText(hit.Location, source+" [location field]", 3.0, result)
+		}
+		// Bio text
+		if hit.Bio != "" {
+			g.scoreText(hit.Bio, source+" [bio]", 2.0, result)
+		}
+		// General snippet
+		if hit.RawSnippet != "" {
+			g.scoreText(hit.RawSnippet, source, 1.5, result)
+		}
 	}
 }
 
