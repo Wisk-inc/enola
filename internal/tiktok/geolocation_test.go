@@ -116,3 +116,87 @@ func TestStripHTML(t *testing.T) {
 		t.Errorf("stripHTML removed text content: %q", got)
 	}
 }
+
+func TestParseCDNToken_USEast(t *testing.T) {
+	cdnURL := "https://v16m-webapp.tiktok.com/video/tos/useast2a/tos-useast2a-ve-0068c001/oQIFFE9N/"
+	token, region := parseCDNToken(cdnURL)
+	if token != "useast2a" {
+		t.Errorf("expected token 'useast2a', got %q", token)
+	}
+	if !strings.Contains(region, "US East") {
+		t.Errorf("expected US East region, got %q", region)
+	}
+}
+
+func TestParseCDNToken_Maliva(t *testing.T) {
+	cdnURL := "https://v19-webapp.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799/abc123/"
+	token, region := parseCDNToken(cdnURL)
+	if token != "maliva" {
+		t.Errorf("expected token 'maliva', got %q (region %q)", token, region)
+	}
+}
+
+func TestParseCDNToken_None(t *testing.T) {
+	cdnURL := "https://example.com/video/unknown/path/"
+	token, _ := parseCDNToken(cdnURL)
+	if token != "" {
+		t.Errorf("expected no token for unknown URL, got %q", token)
+	}
+}
+
+func TestCountryFromCDNToken(t *testing.T) {
+	cases := map[string]string{
+		"useast2a":     "United States",
+		"eu-west-2":    "United Kingdom",
+		"maliva":       "Malaysia",
+		"alisg":        "Singapore",
+		"br":           "Brazil",
+	}
+	for token, want := range cases {
+		got := CountryFromCDNToken(token)
+		if got != want {
+			t.Errorf("CountryFromCDNToken(%q) = %q, want %q", token, got, want)
+		}
+	}
+}
+
+func TestISOToCountry(t *testing.T) {
+	if got := isoToCountry("JM"); got != "Jamaica" {
+		t.Errorf("expected Jamaica, got %q", got)
+	}
+	if got := isoToCountry("GB"); got != "United Kingdom" {
+		t.Errorf("expected United Kingdom, got %q", got)
+	}
+	if got := isoToCountry("XX"); got != "" {
+		t.Errorf("expected empty for unknown code, got %q", got)
+	}
+}
+
+func TestNormaliseVideo_POI(t *testing.T) {
+	raw := apiVideoItem{
+		ID:   "123456",
+		Desc: "Kingston vibes #jamaica",
+		POI: &struct {
+			Name      string  `json:"name"`
+			Address   string  `json:"address"`
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+		}{
+			Name:      "Kingston",
+			Address:   "Kingston, Jamaica",
+			Latitude:  17.9714,
+			Longitude: -76.793,
+		},
+	}
+	v := normaliseVideo(raw)
+	if v.VideoID != "123456" {
+		t.Errorf("unexpected VideoID: %q", v.VideoID)
+	}
+	if v.POI == nil {
+		t.Fatal("expected POI, got nil")
+	}
+	if v.POI.Name != "Kingston" {
+		t.Errorf("expected Kingston, got %q", v.POI.Name)
+	}
+}
+

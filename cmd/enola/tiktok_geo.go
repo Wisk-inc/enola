@@ -181,7 +181,93 @@ func printGeoResult(r *tiktok.GeoResult) {
 		fmt.Println()
 	}
 
+	// ── Video Geolocation (CDN IP + location tags) ────────────────────────
+	if len(r.VideoGeos) > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Video Geolocation (CDN IP Lookup)")
+		fmt.Printf("%s\n", sep)
+		shown := 0
+		for _, vg := range r.VideoGeos {
+			if vg.CDNToken == "" && vg.CDNIP == "" && vg.POI == nil {
+				continue
+			}
+			shown++
+			desc := vg.Desc
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
+			}
+			fmt.Printf("\n  Video: %s\n", vg.VideoID)
+			if desc != "" {
+				fmt.Printf("    Desc      : %s\n", desc)
+			}
+			if vg.POI != nil {
+				fmt.Printf("    Location  : %s", vg.POI.Name)
+				if vg.POI.Address != "" && vg.POI.Address != vg.POI.Name {
+					fmt.Printf(" (%s)", vg.POI.Address)
+				}
+				if vg.POI.Latitude != 0 {
+					fmt.Printf("  [%.4f, %.4f]", vg.POI.Latitude, vg.POI.Longitude)
+				}
+				fmt.Println()
+			}
+			if vg.CDNToken != "" {
+				fmt.Printf("    CDN token : %s  →  %s\n", vg.CDNToken, vg.CDNRegion)
+			}
+			if vg.CDNIP != "" {
+				fmt.Printf("    CDN IP    : %s\n", vg.CDNIP)
+			}
+			if vg.IPGeo != nil {
+				fmt.Printf("    GeoIP     : %s, %s, %s  (ISP: %s)\n",
+					vg.IPGeo.City, vg.IPGeo.Region, vg.IPGeo.Country, vg.IPGeo.ISP)
+				if vg.IPGeo.Lat != 0 {
+					fmt.Printf("    Coords    : %.4f, %.4f\n", vg.IPGeo.Lat, vg.IPGeo.Lon)
+				}
+			}
+		}
+		if shown == 0 {
+			fmt.Println("  (No location data resolved from videos)")
+		}
+		fmt.Println()
+	}
+
+	// ── Comments by target user ───────────────────────────────────────────
+	if len(r.Comments) > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Printf("  Comments by @%s (%d found)\n", r.Username, len(r.Comments))
+		fmt.Printf("%s\n", sep)
+		for i, c := range r.Comments {
+			ts := ""
+			if c.CreateTime > 0 {
+				ts = fmt.Sprintf(" [%s]", formatUnix(c.CreateTime))
+			}
+			fmt.Printf("  [%03d]%s on video %s\n", i+1, ts, c.VideoID)
+			text := c.Text
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			fmt.Printf("        %s\n", text)
+			if c.Region != "" {
+				fmt.Printf("        (region: %s)\n", c.Region)
+			}
+		}
+		fmt.Println()
+	} else if len(r.Videos) > 0 {
+		fmt.Printf("  [i] %d videos scanned — no comments by @%s found in top results\n\n",
+			len(r.Videos), r.Username)
+	}
+
 	if len(r.CountryScores) == 0 {
 		fmt.Println("  [!] No geolocation signals found. Try a different username or add more linked accounts.")
 	}
+}
+
+func formatUnix(ts int64) string {
+	// Basic Unix timestamp → "YYYY-MM-DD"
+	if ts <= 0 {
+		return ""
+	}
+	days := ts / 86400
+	// rough epoch offset
+	year := 1970 + int(days/365)
+	return fmt.Sprintf("~%d", year)
 }

@@ -31,6 +31,9 @@ type GeoResult struct {
 	Confidence    string // High / Medium / Low
 	Emails        []EmailResult
 	LinkedURLs    []string
+	Videos        []VideoItem
+	VideoGeos     []VideoGeoResult
+	Comments      []CommentItem // comments BY the target user on their own videos
 }
 
 // EmailResult bundles a discovered email with all findings about it.
@@ -43,16 +46,20 @@ type EmailResult struct {
 
 // GeoLocator orchestrates the full geolocation pipeline.
 type GeoLocator struct {
-	scraper     *Scraper
-	gmailFinder *GmailFinder
+	scraper      *Scraper
+	gmailFinder  *GmailFinder
+	apiClient    *APIClient
+	videoAnalyzer *VideoGeoAnalyzer
 }
 
 // NewGeoLocator returns a GeoLocator with default HTTP settings.
 func NewGeoLocator() *GeoLocator {
 	s := DefaultScraper()
 	return &GeoLocator{
-		scraper:     s,
-		gmailFinder: NewGmailFinder(s),
+		scraper:       s,
+		gmailFinder:   NewGmailFinder(s),
+		apiClient:     NewAPIClient(s),
+		videoAnalyzer: NewVideoGeoAnalyzer(s),
 	}
 }
 
@@ -151,9 +158,118 @@ func (g *GeoLocator) Analyze(ctx context.Context, input string) (*GeoResult, err
 		result.Emails = append(result.Emails, er)
 	}
 
-	// ── Step 5: Finalise ────────────────────────────────────────────────────
+	// ── Step 5: Video + comment geolocation ────────────────────────────────
+	g.analyzeVideosAndComments(ctx, username, result)
+
+	// ── Step 6: Finalise ────────────────────────────────────────────────────
 	g.finalise(result)
 	return result, nil
+}
+
+// analyzeVideosAndComments fetches the user's videos, extracts location tags
+// and CDN server IPs, fetches comments on each video, logs comments left by
+// the target user, and folds all signals into the score.
+func (g *GeoLocator) analyzeVideosAndComments(ctx context.Context, username string, result *GeoResult) {
+	// Resolve secUid (needed for the video-list API)
+	secUID := ""
+	if result.Profile != nil {
+		secUID = extractSecUID(result.Profile.RawText)
+	}
+	if secUID == "" {
+		var err error
+		secUID, err = g.apiClient.FetchUserSecUID(ctx, username)
+		if err != nil || secUID == "" {
+			return // can't proceed without secUid
+		}
+	}
+
+	// Fetch up to 30 most recent videos
+	videos, err := g.apiClient.FetchVideos(ctx, secUID, 30)
+	if err != nil || len(videos) == 0 {
+		return
+	}
+	result.Videos = videos
+
+	for _, video := range videos {
+		// Score description / hashtags
+		g.scoreText(video.Desc, fmt.Sprintf("video desc (id %s)", video.VideoID), 1.2, result)
+
+		// Score the author region code if present
+		if video.AuthorRegion != "" {
+			g.scoreRegionCode(video.AuthorRegion, fmt.Sprintf("video author region (id %s)", video.VideoID), result)
+		}
+
+		// Score tagged location (POI)
+		if video.POI != nil {
+			loc := video.POI.Name + " " + video.POI.Address
+			g.scoreText(loc, fmt.Sprintf("video location tag (id %s)", video.VideoID), 3.5, result)
+		}
+
+		// CDN IP resolution + GeoIP
+		vgr := g.videoAnalyzer.Analyze(ctx, video)
+		result.VideoGeos = append(result.VideoGeos, *vgr)
+
+		if vgr.CDNToken != "" {
+			country := CountryFromCDNToken(vgr.CDNToken)
+			if country != "" {
+				g.addSignal(result, country,
+					fmt.Sprintf("CDN upload region %q (%s)", vgr.CDNToken, vgr.CDNRegion),
+					fmt.Sprintf("video CDN (id %s)", video.VideoID), 2.0)
+			}
+		}
+		if vgr.IPGeo != nil && vgr.IPGeo.Country != "" {
+			g.addSignal(result, vgr.IPGeo.Country,
+				fmt.Sprintf("CDN IP %s → %s, %s (ISP: %s)", vgr.CDNIP, vgr.IPGeo.City, vgr.IPGeo.Country, vgr.IPGeo.ISP),
+				fmt.Sprintf("GeoIP lookup (video %s)", video.VideoID), 1.5)
+		}
+
+		// Fetch comments on this video (up to 100)
+		comments, err := g.apiClient.FetchComments(ctx, video.VideoID, 100)
+		if err != nil {
+			continue
+		}
+		for i := range comments {
+			comments[i].VideoID = video.VideoID
+			if strings.EqualFold(comments[i].Username, username) {
+				comments[i].IsOwner = true
+				result.Comments = append(result.Comments, comments[i])
+				// Score the text of own comments – high value signal
+				g.scoreText(comments[i].Text,
+					fmt.Sprintf("own comment on video %s", video.VideoID), 2.0, result)
+			}
+			// Also score region codes embedded in any commenter's profile
+			if comments[i].Region != "" && comments[i].IsOwner {
+				g.scoreRegionCode(comments[i].Region,
+					fmt.Sprintf("commenter region field (video %s)", video.VideoID), result)
+			}
+		}
+	}
+}
+
+// scoreRegionCode maps a 2-letter ISO country code to a country name and scores it.
+func (g *GeoLocator) scoreRegionCode(code, source string, result *GeoResult) {
+	country := isoToCountry(code)
+	if country == "" {
+		return
+	}
+	g.addSignal(result, country, fmt.Sprintf("ISO region code %q", strings.ToUpper(code)), source, 4.0)
+}
+
+// isoToCountry maps common ISO 3166-1 alpha-2 codes to country names.
+func isoToCountry(code string) string {
+	m := map[string]string{
+		"JM": "Jamaica", "TT": "Trinidad and Tobago", "BB": "Barbados",
+		"GY": "Guyana", "HT": "Haiti", "LC": "Saint Lucia",
+		"VC": "Saint Vincent", "AG": "Antigua", "DM": "Dominica",
+		"GD": "Grenada", "KN": "Saint Kitts", "BS": "Bahamas",
+		"CU": "Cuba", "DO": "Dominican Republic", "PR": "Puerto Rico",
+		"GB": "United Kingdom", "US": "United States", "CA": "Canada",
+		"NG": "Nigeria", "GH": "Ghana", "KE": "Kenya",
+		"ZA": "South Africa", "DE": "Germany", "FR": "France",
+		"SG": "Singapore", "AU": "Australia", "NZ": "New Zealand",
+		"BR": "Brazil", "MX": "Mexico", "IN": "India",
+	}
+	return m[strings.ToUpper(code)]
 }
 
 // ─── internal scoring helpers ───────────────────────────────────────────────
