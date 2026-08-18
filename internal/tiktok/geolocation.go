@@ -22,20 +22,24 @@ type Signal struct {
 
 // GeoResult is the final output of a full analysis.
 type GeoResult struct {
-	Username       string
-	TikTokURL      string
-	Profile        *TikTokProfile
-	Signals        []Signal
-	CountryScores  map[string]float64
-	BestGuess      string
-	Confidence     string // High / Medium / Low
-	Emails         []EmailResult
-	LinkedURLs     []string
-	Videos         []VideoItem
-	VideoGeos      []VideoGeoResult
-	Comments       []CommentItem // comments BY the target user on their own videos
-	PostingPattern *PostingPattern
-	CrossPlatform  []CrossPlatformHit
+	Username        string
+	TikTokURL       string
+	Profile         *TikTokProfile
+	Signals         []Signal
+	CountryScores   map[string]float64
+	BestGuess       string
+	Confidence      string // High / Medium / Low
+	Emails          []EmailResult
+	LinkedURLs      []string
+	Videos          []VideoItem
+	VideoGeos       []VideoGeoResult
+	Comments        []CommentItem // comments BY the target user on their own videos
+	PostingPattern  *PostingPattern
+	CrossPlatform   []CrossPlatformHit
+	FlagEmojis      []string        // ISO codes of flag emojis found in profile/comments
+	DialectScores   []DialectScore  // language/dialect fingerprint results
+	Contacts        []ContactInfo   // WhatsApp / phone contacts extracted
+	AudienceRegions map[string]int  // commenter ISO region → count
 }
 
 // EmailResult bundles a discovered email with all findings about it.
@@ -75,9 +79,10 @@ func (g *GeoLocator) Analyze(ctx context.Context, input string) (*GeoResult, err
 	}
 
 	result := &GeoResult{
-		Username:      username,
-		TikTokURL:     fmt.Sprintf("https://www.tiktok.com/@%s", username),
-		CountryScores: make(map[string]float64),
+		Username:        username,
+		TikTokURL:       fmt.Sprintf("https://www.tiktok.com/@%s", username),
+		CountryScores:   make(map[string]float64),
+		AudienceRegions: make(map[string]int),
 	}
 
 	// ── Step 1: TikTok profile ──────────────────────────────────────────────
@@ -171,7 +176,10 @@ func (g *GeoLocator) Analyze(ctx context.Context, input string) (*GeoResult, err
 	// ── Step 7: Cross-platform profile correlation ──────────────────────────
 	g.analyzeCrossPlatform(ctx, username, result)
 
-	// ── Step 8: Finalise ────────────────────────────────────────────────────
+	// ── Step 8: Rich signal analysis (emoji, dialect, contacts, sounds) ─────
+	g.analyzeRichSignals(result)
+
+	// ── Step 9: Finalise ────────────────────────────────────────────────────
 	g.finalise(result)
 	return result, nil
 }
@@ -233,6 +241,14 @@ func (g *GeoLocator) analyzeVideosAndComments(ctx context.Context, username stri
 				fmt.Sprintf("GeoIP lookup (video %s)", video.VideoID), 1.5)
 		}
 
+		// Score sound/music artist for each video
+		if video.SoundAuthor != "" || video.SoundTitle != "" {
+			if country, evidence, w := ScoreSoundArtist(video.SoundAuthor, video.SoundTitle); country != "" {
+				g.addSignal(result, country, evidence,
+					fmt.Sprintf("sound track (video %s)", video.VideoID), w)
+			}
+		}
+
 		// Fetch comments on this video (up to 100)
 		comments, err := g.apiClient.FetchComments(ctx, video.VideoID, 100)
 		if err != nil {
@@ -240,6 +256,10 @@ func (g *GeoLocator) analyzeVideosAndComments(ctx context.Context, username stri
 		}
 		for i := range comments {
 			comments[i].VideoID = video.VideoID
+			// Tally all commenter regions for audience clustering
+			if comments[i].Region != "" {
+				result.AudienceRegions[strings.ToUpper(comments[i].Region)]++
+			}
 			if strings.EqualFold(comments[i].Username, username) {
 				comments[i].IsOwner = true
 				result.Comments = append(result.Comments, comments[i])
@@ -247,13 +267,16 @@ func (g *GeoLocator) analyzeVideosAndComments(ctx context.Context, username stri
 				g.scoreText(comments[i].Text,
 					fmt.Sprintf("own comment on video %s", video.VideoID), 2.0, result)
 			}
-			// Also score region codes embedded in any commenter's profile
+			// Also score region codes embedded in the owner's commenter profile
 			if comments[i].Region != "" && comments[i].IsOwner {
 				g.scoreRegionCode(comments[i].Region,
 					fmt.Sprintf("commenter region field (video %s)", video.VideoID), result)
 			}
 		}
 	}
+
+	// Score audience region clusters
+	scoreAudienceRegions(result.AudienceRegions, result, g)
 }
 
 // scoreRegionCode maps a 2-letter ISO country code to a country name and scores it.
@@ -512,6 +535,105 @@ func (g *GeoLocator) analyzeCrossPlatform(ctx context.Context, username string, 
 		if hit.RawSnippet != "" {
 			g.scoreText(hit.RawSnippet, source, 1.5, result)
 		}
+	}
+}
+
+// analyzeRichSignals integrates flag emoji, dialect, and contact signals.
+func (g *GeoLocator) analyzeRichSignals(result *GeoResult) {
+	// ── Flag emojis ─────────────────────────────────────────────────────────
+	bioNick := ""
+	if result.Profile != nil {
+		bioNick = result.Profile.Bio + " " + result.Profile.Nickname
+	}
+	flagSources := map[string]string{
+		bioNick:                          "bio/nickname",
+		strings.Join(result.FlagEmojis, ""): "",
+	}
+	// Scan bio/nickname for flags
+	if bioNick != "" {
+		for _, iso := range ExtractFlagEmojis(bioNick) {
+			result.FlagEmojis = append(result.FlagEmojis, iso)
+			if country := isoToCountry(iso); country != "" {
+				w := FlagWeight("bio")
+				g.addSignal(result, country,
+					fmt.Sprintf("flag emoji 🏳 ISO=%s in bio/nickname", iso),
+					"flag emoji (bio)", w)
+			}
+		}
+	}
+	// Scan own comments for flags
+	for _, c := range result.Comments {
+		for _, iso := range ExtractFlagEmojis(c.Text) {
+			if country := isoToCountry(iso); country != "" {
+				w := FlagWeight("comment")
+				g.addSignal(result, country,
+					fmt.Sprintf("flag emoji ISO=%s in own comment", iso),
+					"flag emoji (own comment)", w)
+			}
+		}
+	}
+	_ = flagSources // used above for bio/nickname source label
+
+	// ── Dialect fingerprinting ───────────────────────────────────────────────
+	allText := bioNick
+	for _, v := range result.Videos {
+		allText += " " + v.Desc
+	}
+	for _, c := range result.Comments {
+		allText += " " + c.Text
+	}
+	for _, cp := range result.CrossPlatform {
+		allText += " " + cp.Bio + " " + cp.RawSnippet
+	}
+
+	if allText != "" {
+		scores := ScoreDialect(allText)
+		result.DialectScores = scores
+		if country, evidence, w := DialectCountry(scores); country != "" {
+			g.addSignal(result, country, evidence, "dialect fingerprint", w)
+		}
+	}
+
+	// ── Contact extraction (WhatsApp / phone) ────────────────────────────────
+	contacts := ExtractContacts(allText)
+	result.Contacts = contacts
+	for _, ci := range contacts {
+		if ci.Country != "" {
+			g.addSignal(result, ci.Country, ci.Evidence, "contact info", ci.Weight)
+		}
+	}
+}
+
+// scoreAudienceRegions scores commenter region clustering as a weak audience signal.
+func scoreAudienceRegions(regions map[string]int, result *GeoResult, g *GeoLocator) {
+	if len(regions) == 0 {
+		return
+	}
+	// Find total commenter count and dominant region
+	total := 0
+	for _, cnt := range regions {
+		total += cnt
+	}
+	if total == 0 {
+		return
+	}
+	for iso, cnt := range regions {
+		country := isoToCountry(iso)
+		if country == "" {
+			continue
+		}
+		pct := float64(cnt) / float64(total)
+		if pct < 0.10 {
+			continue // ignore regions with <10% of commenters
+		}
+		// Weak signal: audience location may reflect the creator's location
+		w := pct * 2.0
+		if w > 2.0 {
+			w = 2.0
+		}
+		g.addSignal(result, country,
+			fmt.Sprintf("%.0f%% of commenters are from %s (%d/%d)", pct*100, country, cnt, total),
+			"audience region cluster", w)
 	}
 }
 

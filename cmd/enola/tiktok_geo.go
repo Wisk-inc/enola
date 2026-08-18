@@ -336,6 +336,83 @@ func printGeoResult(r *tiktok.GeoResult) {
 		fmt.Println()
 	}
 
+	// ── Flag Emojis ───────────────────────────────────────────────────────────
+	if len(r.FlagEmojis) > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Flag Emojis Detected")
+		fmt.Printf("%s\n", sep)
+		for _, iso := range r.FlagEmojis {
+			fmt.Printf("    • ISO %s\n", iso)
+		}
+		fmt.Println()
+	}
+
+	// ── Dialect Fingerprint ───────────────────────────────────────────────────
+	if len(r.DialectScores) > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Dialect / Language Fingerprint")
+		fmt.Printf("%s\n", sep)
+		for i, ds := range r.DialectScores {
+			if i >= 5 {
+				break
+			}
+			matches := strings.Join(ds.Matches, ", ")
+			if len(matches) > 80 {
+				matches = matches[:77] + "..."
+			}
+			fmt.Printf("    %-22s  score=%.1f  matches: %s\n", ds.Dialect, ds.Score, matches)
+		}
+		fmt.Println()
+	}
+
+	// ── Extracted Contacts ────────────────────────────────────────────────────
+	if len(r.Contacts) > 0 {
+		fmt.Printf("%s\n", sep)
+		fmt.Println("  Extracted Contacts (WhatsApp / Phone)")
+		fmt.Printf("%s\n", sep)
+		for _, c := range r.Contacts {
+			country := c.Country
+			if country == "" {
+				country = "(unknown)"
+			}
+			fmt.Printf("    [%s] %s → %s\n", c.Type, c.Raw, country)
+			fmt.Printf("         %s  (weight: %.1f)\n", c.Evidence, c.Weight)
+		}
+		fmt.Println()
+	}
+
+	// ── Audience Region Cluster ───────────────────────────────────────────────
+	if len(r.AudienceRegions) > 0 {
+		total := 0
+		for _, cnt := range r.AudienceRegions {
+			total += cnt
+		}
+		if total >= 5 {
+			type rc struct {
+				iso   string
+				count int
+			}
+			var sorted []rc
+			for iso, cnt := range r.AudienceRegions {
+				sorted = append(sorted, rc{iso, cnt})
+			}
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i].count > sorted[j].count })
+
+			fmt.Printf("%s\n", sep)
+			fmt.Printf("  Audience Region Cluster (%d commenters sampled)\n", total)
+			fmt.Printf("%s\n", sep)
+			for i, rc := range sorted {
+				if i >= 8 {
+					break
+				}
+				pct := float64(rc.count) / float64(total) * 100
+				bar := strings.Repeat("█", int(pct/5))
+				fmt.Printf("    %-4s  %5.1f%%  %s (%d)\n", rc.iso, pct, bar, rc.count)
+			}
+			fmt.Println()
+		}
+	}
+
 	if len(r.CountryScores) == 0 {
 		fmt.Println("  [!] No geolocation signals found. Try a different username or add more linked accounts.")
 	}

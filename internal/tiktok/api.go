@@ -45,6 +45,11 @@ type apiVideoItem struct {
 		Region   string `json:"region"`
 	} `json:"author"`
 
+	Music struct {
+		AuthorName string `json:"authorName"`
+		Title      string `json:"title"`
+	} `json:"music"`
+
 	// Location sticker / POI
 	POI *struct {
 		Name      string  `json:"name"`
@@ -105,12 +110,14 @@ type apiComment struct {
 
 // VideoItem is a normalised TikTok video.
 type VideoItem struct {
-	VideoID    string
-	Desc       string
-	CreateTime int64
-	POI        *POIInfo // location tag, if any
-	PlayURLs   []string
+	VideoID      string
+	Desc         string
+	CreateTime   int64
+	POI          *POIInfo // location tag, if any
+	PlayURLs     []string
 	AuthorRegion string
+	SoundAuthor  string // music track author name
+	SoundTitle   string // music track title
 }
 
 // POIInfo holds a tagged location.
@@ -295,6 +302,10 @@ func normaliseVideo(raw apiVideoItem) VideoItem {
 	}
 	v.PlayURLs = append(v.PlayURLs, raw.Video.DownloadAddrObj.URLList...)
 	v.PlayURLs = dedupe(v.PlayURLs)
+
+	// Sound / music info
+	v.SoundAuthor = raw.Music.AuthorName
+	v.SoundTitle = raw.Music.Title
 
 	// POI / location sticker
 	if raw.POI != nil && raw.POI.Name != "" {
